@@ -22,10 +22,15 @@ CLIENT_TEMPLATE = """
     container_name: client_{agency_id}
     depends_on:
       - server
+    volumes:
+      - ./input:/input:ro
+      - ./output:/output
     environment:
       - AGENCY_ID={agency_id}
       - SERVER_HOST=server
       - SERVER_PORT=5678
+      - INPUT_FILE=/input/input-{agency_id}.csv
+      - OUTPUT_FILE=/output/output-{agency_id}.csv
 """
 
 OUTPUT_PATH = "docker-compose.yaml"
