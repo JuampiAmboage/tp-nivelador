@@ -31,6 +31,7 @@ CLIENT_TEMPLATE = """
       - SERVER_PORT=5678
       - INPUT_FILE=/input/input-{agency_id}.csv
       - OUTPUT_FILE=/output/output-{agency_id}.csv
+      - BATCH_SIZE=50
 """
 
 OUTPUT_PATH = "docker-compose.yaml"

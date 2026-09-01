@@ -15,9 +15,14 @@ class Server:
         # load_bets() requires the file to already exist, even with zero bets stored so far
         open(_BETS_STORAGE_PATH, "a").close()
 
-    def _parse_bet(self, agency_id: int, payload: bytes) -> Bet:
-        [first_name, last_name, document, birthdate, number] = payload.decode().split(",")
+    def _parse_bet(self, agency_id: int, line: str) -> Bet:
+        [first_name, last_name, document, birthdate, number] = line.split(",")
         return Bet(agency_id, first_name, last_name, int(document), birthdate, int(number))
+
+    def _parse_bet_batch(self, agency_id: int, payload: bytes) -> list[Bet]:
+        return [
+            self._parse_bet(agency_id, line) for line in payload.decode().split("\n")
+        ]
 
     def _compute_winners(self, agency_id: int) -> bytes:
         winners = [
@@ -43,9 +48,12 @@ class Server:
                 if message_type == protocol.HELLO:
                     agency_id = int(payload.decode())
                 elif message_type == protocol.BET:
-                    bet = self._parse_bet(agency_id, payload)
-                    self.lottery.store_bets([bet])
-                    bet_amount += 1
+                    # Parsing happens before store_bets, so a malformed bet fails the whole
+                    # batch atomically instead of partially storing it
+                    bets = self._parse_bet_batch(agency_id, payload)
+                    self.lottery.store_bets(bets)
+                    bet_amount += len(bets)
+                    protocol.write_message(client_socket, protocol.ACK, b"")
                 elif message_type == protocol.DONE:
                     break
                 else:

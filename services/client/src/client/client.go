@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
@@ -22,6 +23,7 @@ type ClientConfig struct {
 	AgencyId   string
 	InputFile  string
 	OutputFile string
+	BatchSize  int
 }
 
 type Client struct {
@@ -61,6 +63,66 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
+// sendBatch sends a full batch as a single BET message and waits for the server's ACK,
+// so a network failure or a rejected (malformed) batch is caught before the next one is sent
+func (client *Client) sendBatch(batch []string) error {
+	payload := []byte(strings.Join(batch, "\n"))
+	if err := protocol.WriteMessage(client.conn, protocol.Bet, payload); err != nil {
+		return err
+	}
+
+	messageType, _, err := protocol.ReadMessage(client.conn)
+	if err != nil {
+		return err
+	}
+	if messageType != protocol.Ack {
+		return fmt.Errorf("expected an ACK message, got type %q", messageType)
+	}
+	return nil
+}
+
+// sendBets streams every non-empty line of inputFile to the server in BATCH_SIZE-sized
+// batches, waiting for the server's ACK after each one, and returns how many bets were sent
+func (client *Client) sendBets(inputFile *os.File, agencyArgs []any) (int, error) {
+	betAmount := 0
+	batch := make([]string, 0, client.config.BatchSize)
+	scanner := bufio.NewScanner(inputFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		batch = append(batch, line)
+		betAmount++
+
+		if len(batch) == client.config.BatchSize {
+			// Network error, or the server rejected this batch, while sending it
+			if err := client.sendBatch(batch); err != nil {
+				logger.Error("send-bet-batch", logger.Fail, agencyArgs...)
+				return betAmount, err
+			}
+			batch = batch[:0]
+		}
+	}
+
+	// scanner.Err() is non-nil only for read errors, not for a clean EOF
+	if err := scanner.Err(); err != nil {
+		logger.Error("read-input-file", logger.Fail, agencyArgs...)
+		return betAmount, err
+	}
+
+	// Flush the leftover partial batch, if the file's bet count isn't a multiple of BATCH_SIZE
+	if len(batch) > 0 {
+		if err := client.sendBatch(batch); err != nil {
+			logger.Error("send-bet-batch", logger.Fail, agencyArgs...)
+			return betAmount, err
+		}
+	}
+
+	return betAmount, nil
+}
+
 func (client *Client) Run() error {
 	const mainAction = "process-bets"
 	agencyArgs := []any{"agency-id", client.config.AgencyId}
@@ -90,25 +152,8 @@ func (client *Client) Run() error {
 		return err
 	}
 
-	betAmount := 0
-	scanner := bufio.NewScanner(inputFile)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		// Network error (connection reset, broken pipe, etc.) while sending this bet to the server
-		if err := protocol.WriteMessage(client.conn, protocol.Bet, []byte(line)); err != nil {
-			logger.Error("send-bet", logger.Fail, agencyArgs...)
-			return err
-		}
-		betAmount++
-	}
-
-	// scanner.Err() is non-nil only for read errors, not for a clean EOF
-	if err := scanner.Err(); err != nil {
-		logger.Error("read-input-file", logger.Fail, agencyArgs...)
+	betAmount, err := client.sendBets(inputFile, agencyArgs)
+	if err != nil {
 		return err
 	}
 

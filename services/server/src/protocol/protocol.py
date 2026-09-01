@@ -5,6 +5,7 @@ HELLO = b"H"
 BET = b"B"
 DONE = b"D"
 WINNERS = b"W"
+ACK = b"A"
 
 _MESSAGE_TYPE_SIZE = 1
 _PAYLOAD_LENGTH_SIZE = 4

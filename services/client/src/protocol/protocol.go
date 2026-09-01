@@ -15,6 +15,7 @@ const (
 	Bet     MessageType = 'B'
 	Done    MessageType = 'D'
 	Winners MessageType = 'W'
+	Ack     MessageType = 'A'
 )
 
 const messageTypeSize = 1
