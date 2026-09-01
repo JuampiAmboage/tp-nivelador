@@ -13,8 +13,6 @@ import (
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 200
 
-const ECHO_CLIENT_BUFFER_SIZE = 512
-
 type ClientConfig struct {
 	ServerHost string
 	ServerPort string
@@ -99,8 +97,9 @@ func (client *Client) Run() error {
 			return err
 		}
 
-		// Network error while waiting for the server's response to this bet
-		response, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
+		// Server still echoes verbatim at this stage, so the response is exactly as long as what we sent;
+		// network error while waiting for it counts here too (connection dropped, incomplete response, etc.)
+		response, err := safe_socket.RecvAll(client.conn, len(line))
 		if err != nil {
 			logger.Error("recv-response", logger.Fail, agencyArgs...)
 			return err
