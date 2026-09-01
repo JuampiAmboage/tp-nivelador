@@ -2,16 +2,19 @@ package client
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"os"
 	"time"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
-	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
+	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/protocol"
 )
 
-const CONNECTION_ATTEMPTS_MAX = 3
-const CONNECTION_ATTEMPS_DELAY_MS = 200
+// Generous retry budget: docker compose starting every container at once means the server
+// may still be binding its socket well after this client's process has already started
+const CONNECTION_ATTEMPTS_MAX = 15
+const CONNECTION_ATTEMPS_DELAY_MS = 500
 
 type ClientConfig struct {
 	ServerHost string
@@ -79,11 +82,15 @@ func (client *Client) Run() error {
 	}
 	defer outputFile.Close()
 
-	writer := bufio.NewWriter(outputFile)
-	defer writer.Flush()
-
 	logger.Info(mainAction, logger.InProgress, agencyArgs...)
 
+	// Network error identifying this agency to the server before sending any bets
+	if err := protocol.WriteMessage(client.conn, protocol.Hello, []byte(client.config.AgencyId)); err != nil {
+		logger.Error("send-hello", logger.Fail, agencyArgs...)
+		return err
+	}
+
+	betAmount := 0
 	scanner := bufio.NewScanner(inputFile)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -92,28 +99,11 @@ func (client *Client) Run() error {
 		}
 
 		// Network error (connection reset, broken pipe, etc.) while sending this bet to the server
-		if err := safe_socket.SendAll(client.conn, []byte(line)); err != nil {
-			logger.Error("send-message", logger.Fail, agencyArgs...)
+		if err := protocol.WriteMessage(client.conn, protocol.Bet, []byte(line)); err != nil {
+			logger.Error("send-bet", logger.Fail, agencyArgs...)
 			return err
 		}
-
-		// Server still echoes verbatim at this stage, so the response is exactly as long as what we sent;
-		// network error while waiting for it counts here too (connection dropped, incomplete response, etc.)
-		response, err := safe_socket.RecvAll(client.conn, len(line))
-		if err != nil {
-			logger.Error("recv-response", logger.Fail, agencyArgs...)
-			return err
-		}
-
-		// Disk/filesystem error persisting the response (e.g. output volume full or unmounted)
-		if _, err := writer.Write(response); err != nil {
-			logger.Error("write-output-file", logger.Fail, agencyArgs...)
-			return err
-		}
-		if err := writer.WriteByte('\n'); err != nil {
-			logger.Error("write-output-file", logger.Fail, agencyArgs...)
-			return err
-		}
+		betAmount++
 	}
 
 	// scanner.Err() is non-nil only for read errors, not for a clean EOF
@@ -122,6 +112,29 @@ func (client *Client) Run() error {
 		return err
 	}
 
-	logger.Info(mainAction, logger.Success, agencyArgs...)
+	// Network error signaling the server this agency has no more bets to send
+	if err := protocol.WriteMessage(client.conn, protocol.Done, []byte{}); err != nil {
+		logger.Error("send-done", logger.Fail, agencyArgs...)
+		return err
+	}
+
+	// Network error waiting for the server to compute and send back this agency's winners
+	messageType, payload, err := protocol.ReadMessage(client.conn)
+	if err != nil {
+		logger.Error("recv-winners", logger.Fail, agencyArgs...)
+		return err
+	}
+	if messageType != protocol.Winners {
+		logger.Error("recv-winners", logger.Fail, agencyArgs...)
+		return fmt.Errorf("expected a WINNERS message, got type %q", messageType)
+	}
+
+	// Disk/filesystem error persisting the winners (e.g. output volume full or unmounted)
+	if _, err := outputFile.Write(payload); err != nil {
+		logger.Error("write-output-file", logger.Fail, agencyArgs...)
+		return err
+	}
+
+	logger.Info(mainAction, logger.Success, append(agencyArgs, "bet-amount", betAmount)...)
 	return nil
 }
