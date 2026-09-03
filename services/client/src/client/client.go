@@ -42,6 +42,13 @@ func NewClient(config ClientConfig) (*Client, error) {
 	return client, nil
 }
 
+// Shutdown closes the connection to unblock any Read/Write currently in progress on it.
+// Safe to call concurrently with Run(): closing a net.Conn while another goroutine is
+// blocked on it is documented Go behavior - that call returns immediately with an error.
+func (client *Client) Shutdown() {
+	client.conn.Close()
+}
+
 func connectToServer(host, port string) (net.Conn, error) {
 	const action = "connect-to-server"
 	var err error
