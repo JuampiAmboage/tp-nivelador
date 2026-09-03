@@ -12,6 +12,7 @@ SERVER_TEMPLATE = """services:
       - PYTHONUNBUFFERED=1
       - SERVER_HOST=server
       - SERVER_PORT=5678
+      - AGENCY_QUORUM_MIN={agency_quorum_min}
 """
 
 CLIENT_TEMPLATE = """
@@ -38,7 +39,8 @@ OUTPUT_PATH = "docker-compose.yaml"
 
 
 def generate(client_amount: int) -> str:
-    content = SERVER_TEMPLATE
+    # By default, wait for every configured client before running the draw
+    content = SERVER_TEMPLATE.format(agency_quorum_min=client_amount)
     for agency_id in range(client_amount):
         content += CLIENT_TEMPLATE.format(agency_id=agency_id)
     return content

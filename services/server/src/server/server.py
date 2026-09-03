@@ -1,4 +1,5 @@
 import socket
+import threading
 
 import logger
 import protocol
@@ -8,12 +9,20 @@ _BETS_STORAGE_PATH = "/tmp/bets.csv"
 
 
 class Server:
-    def __init__(self, server_host: str, server_port: int) -> None:
+    def __init__(self, server_host: str, server_port: int, agency_quorum_min: int) -> None:
         self.server_host = server_host
         self.server_port = server_port
+        self.agency_quorum_min = agency_quorum_min
         self.lottery = Lottery(storage_path=_BETS_STORAGE_PATH)
         # load_bets() requires the file to already exist, even with zero bets stored so far
         open(_BETS_STORAGE_PATH, "a").close()
+
+        # Guards concurrent access to bets.csv, now that multiple client threads can
+        # store_bets/load_bets at the same time
+        self._storage_lock = threading.Lock()
+        # Coordinates the quorum wait: agencies block here until enough of them are done
+        self._quorum_condition = threading.Condition()
+        self._finished_agencies = set()
 
     def _parse_bet(self, agency_id: int, line: str) -> Bet:
         [first_name, last_name, document, birthdate, number] = line.split(",")
@@ -36,6 +45,17 @@ class Server:
         ]
         return "\n".join(rows).encode()
 
+    def _await_quorum(self, agency_id: int) -> None:
+        # Blocks until AGENCY_QUORUM_MIN distinct agencies have all finished sending bets.
+        # If that count is never reached (e.g. fewer agencies connect than the quorum needs),
+        # this waits forever by design - the draw only happens once enough agencies are in.
+        with self._quorum_condition:
+            self._finished_agencies.add(agency_id)
+            self._quorum_condition.notify_all()
+            self._quorum_condition.wait_for(
+                lambda: len(self._finished_agencies) >= self.agency_quorum_min
+            )
+
     def _handle_client(self, client_socket):
         action = "handle-client"
         agency_id = None
@@ -51,7 +71,8 @@ class Server:
                     # Parsing happens before store_bets, so a malformed bet fails the whole
                     # batch atomically instead of partially storing it
                     bets = self._parse_bet_batch(agency_id, payload)
-                    self.lottery.store_bets(bets)
+                    with self._storage_lock:
+                        self.lottery.store_bets(bets)
                     bet_amount += len(bets)
                     protocol.write_message(client_socket, protocol.ACK, b"")
                 elif message_type == protocol.DONE:
@@ -60,7 +81,10 @@ class Server:
                     # Client and server versions disagree on the protocol, or the stream got corrupted
                     raise ValueError(f"unexpected message type {message_type!r}")
 
-            winners_payload = self._compute_winners(agency_id)
+            self._await_quorum(agency_id)
+
+            with self._storage_lock:
+                winners_payload = self._compute_winners(agency_id)
             protocol.write_message(client_socket, protocol.WINNERS, winners_payload)
 
             logger.info(
@@ -72,7 +96,8 @@ class Server:
                 bet_amount,
             )
         except Exception as e:
-            # Covers network errors from protocol.read_message/write_message and malformed bet lines
+            # Covers network errors from protocol.read_message/write_message and malformed bet lines;
+            # an uncaught exception here only kills this client's own thread, not the whole server
             logger.error(
                 action,
                 logger.LogResult.fail,
@@ -97,4 +122,6 @@ class Server:
                     raise e
                 logger.info(action, logger.LogResult.success)
 
-                self._handle_client(client_socket)
+                threading.Thread(
+                    target=self._handle_client, args=(client_socket,), daemon=True
+                ).start()
